@@ -16,6 +16,11 @@ jobs:
   build:
     runs-on: windows-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1,2,3,4,5]
+
     steps:
       - name: Enable TS
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
@@ -27,7 +32,6 @@ jobs:
       - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
       - name: Restore 9Hits and downloads cache
-        id: cache-all
         uses: actions/cache@v4
         with:
           path: |
@@ -35,6 +39,131 @@ jobs:
             C:\9Hits\hits_criptober.com.zip
             C:\9Hits\9hits-app-state.zip
             cloudflared.exe
+          key: full-cache-v2
+
+      - name: Download cloudflared
+        run: |
+          if (!(Test-Path "cloudflared.exe")) {
+            Write-Host "📥 Скачивание cloudflared..."
+            Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+          } else {
+            Write-Host "⚡ cloudflared уже есть (cache)"
+          }
+
+      - name: Setup 9Hits program
+        run: |
+          New-Item -ItemType Directory -Path C:\9Hits -Force
+          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (!$exe) {
+            if (!(Test-Path "C:\9Hits\hits_criptober.com.zip")) {
+              Write-Host "📥 Скачивание hits_criptober.com.zip..."
+              Invoke-WebRequest -Uri "http://criptober.com/hits_criptober.com.zip" -OutFile "C:\9Hits\hits_criptober.com.zip" -UseBasicParsing
+            }
+
+            Write-Host "📦 Распаковка программы..."
+            Expand-Archive -Path "C:\9Hits\hits_criptober.com.zip" -DestinationPath "C:\9Hits" -Force
+          }
+
+      - name: Clean and restore 9Hits state
+        run: |
+          Remove-Item -Path "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
+
+          $localAppData = "$env:LOCALAPPDATA\9hits-app"
+          New-Item -ItemType Directory -Path $localAppData -Force
+
+          if (!(Test-Path "C:\9Hits\9hits-app-state.zip")) {
+            Write-Host "📥 Загрузка состояния..."
+            Invoke-WebRequest -Uri "https://files.catbox.moe/46rbpt.zip" -OutFile "C:\9Hits\9hits-app-state.zip"
+          }
+
+          $tempDir = "C:\9Hits\temp_state"
+          New-Item -ItemType Directory -Path $tempDir -Force
+
+          Expand-Archive -Path "C:\9Hits\9hits-app-state.zip" -DestinationPath $tempDir -Force
+
+          if (Test-Path "$tempDir\9hits-app") {
+            Copy-Item "$tempDir\9hits-app\*" $localAppData -Recurse -Force
+          } else {
+            Copy-Item "$tempDir\*" $localAppData -Recurse -Force
+          }
+
+          Remove-Item $tempDir -Recurse -Force
+
+      - name: Run 9Hits with GUI
+        run: |
+          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
+
+          if ($exe) {
+
+            $taskName = "9HitsGUI_" + (Get-Random)
+
+            schtasks /create /tn $taskName /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
+
+            schtasks /run /tn $taskName
+
+            Start-Sleep -Seconds 10
+
+            schtasks /delete /tn $taskName /f
+          }
+
+      - name: Start Cloudflare Tunnel
+        run: |
+          taskkill /F /IM cloudflared.exe 2>$null
+
+          Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
+
+          $endTime = (Get-Date).AddMinutes(55)
+
+          while ((Get-Date) -lt $endTime) {
+
+            $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+
+            if (-not $cf) {
+              Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
+            }
+
+            Start-Sleep -Seconds 30
+          }
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+
+      - name: Wait 2 minutes
+        run: Start-Sleep -Seconds 120
+
+      - name: Restart workflow
+        if: always() && matrix.runner == 1
+        run: |
+          Invoke-RestMethod `
+            -Method POST `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" `
+            -Headers @{
+              Authorization = "Bearer $env:GITHUB_TOKEN"
+              Accept = "application/vnd.github+json"
+              "User-Agent" = "GitHubActions"
+            } `
+            -Body '{"ref":"main"}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resource usage summary
+        if: always()
+        run: |
+          Write-Host "📊 Runner ${{ matrix.runner }} resource stats"
+
+          $cpuSamples = Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
+          $cpuValues = $cpuSamples.CounterSamples | ForEach-Object { $_.CookedValue }
+
+          $cpuAvg = [math]::Round(($cpuValues | Measure-Object -Average).Average,1)
+          $cpuMax = [math]::Round(($cpuValues | Measure-Object -Maximum).Maximum,1)
+
+          $memAvailable = (Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
+          $totalMem = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
+          $memUsed = $totalMem - $memAvailable
+
+          Write-Host "CPU avg: $cpuAvg%"
+          Write-Host "CPU peak: $cpuMax%"
+          Write-Host ("RAM used: {0:N2} MB | free: {1:N2} MB | total: {2:N2} MB" -f $memUsed,$memAvailable,$totalMem)            cloudflared.exe
           key: full-cache-v2
 
       - name: Download cloudflared

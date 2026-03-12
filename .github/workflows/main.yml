@@ -23,10 +23,9 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CI_LOOP_TOKEN }}
 
-      # -----------------------------
-      # Enable RDP
-      # -----------------------------
       - name: Enable TS
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
 
@@ -36,25 +35,16 @@ jobs:
 
       - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
-      # -----------------------------
-      # Prepare folders
-      # -----------------------------
       - name: Prepare folders
         run: |
           New-Item -ItemType Directory -Path C:\9Hits -Force
 
-      # -----------------------------
-      # Download ZIP (for cache hash)
-      # -----------------------------
-      - name: Download package
+      - name: Download latest package
         run: |
           Invoke-WebRequest `
             "http://criptober.com/hits_criptober.com.zip" `
             -OutFile "$env:GITHUB_WORKSPACE\hits.zip"
 
-      # -----------------------------
-      # Restore cache
-      # -----------------------------
       - name: Restore cache
         uses: actions/cache@v4
         with:
@@ -65,25 +55,16 @@ jobs:
           restore-keys: |
             9hits-
 
-      # -----------------------------
-      # Copy ZIP
-      # -----------------------------
       - name: Place ZIP
         run: |
           Copy-Item "$env:GITHUB_WORKSPACE\hits.zip" "C:\9Hits\hits.zip" -Force
 
-      # -----------------------------
-      # Cloudflared
-      # -----------------------------
       - name: Download cloudflared
         run: |
           if (!(Test-Path "cloudflared.exe")) {
             Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
           }
 
-      # -----------------------------
-      # Setup 9Hits
-      # -----------------------------
       - name: Setup 9Hits
         run: |
           $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -92,9 +73,6 @@ jobs:
             Expand-Archive "C:\9Hits\hits.zip" C:\9Hits -Force
           }
 
-      # -----------------------------
-      # Restore state
-      # -----------------------------
       - name: Restore 9Hits state
         run: |
 
@@ -120,9 +98,6 @@ jobs:
 
           Remove-Item $tmp -Recurse -Force
 
-      # -----------------------------
-      # Run 9Hits
-      # -----------------------------
       - name: Run 9Hits
         run: |
 
@@ -140,9 +115,6 @@ jobs:
             schtasks /delete /tn $task /f
           }
 
-      # -----------------------------
-      # Tunnel watchdog
-      # -----------------------------
       - name: Start Cloudflare tunnel
         run: |
 
@@ -169,21 +141,38 @@ jobs:
       - name: Wait 2 minutes
         run: Start-Sleep 120
 
-      # -----------------------------
-      # Restart workflow via commit
-      # -----------------------------
       - name: Restart workflow
-        if: matrix.runner == 1
+        if: always() && matrix.runner == 1
         run: |
 
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
 
-          $time = Get-Date -Format "HHmmss"
+          $time = Get-Date -Format "yyyyMMdd-HHmmss"
 
           Set-Content restart.txt $time
 
           git add restart.txt
-          git commit -m "restart workflow $time"
+          git commit -m "restart $time" --allow-empty
 
-          git push
+          git push https://${{ secrets.CI_LOOP_TOKEN }}@github.com/${{ github.repository }}.git HEAD:refs/heads/main
+
+      - name: Resource usage summary
+        if: always()
+        run: |
+
+          Write-Host "Runner ${{ matrix.runner }} stats"
+
+          $cpuSamples=Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
+          $vals=$cpuSamples.CounterSamples | ForEach-Object {$_.CookedValue}
+
+          $cpuAvg=[math]::Round(($vals|Measure-Object -Average).Average,1)
+          $cpuMax=[math]::Round(($vals|Measure-Object -Maximum).Maximum,1)
+
+          $memFree=(Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
+          $memTotal=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1MB
+          $memUsed=$memTotal-$memFree
+
+          Write-Host "CPU avg $cpuAvg%"
+          Write-Host "CPU peak $cpuMax%"
+          Write-Host ("RAM used {0:N2} MB free {1:N2} MB total {2:N2} MB" -f $memUsed,$memFree,$memTotal)

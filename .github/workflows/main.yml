@@ -23,6 +23,10 @@ jobs:
         runner: [1,2,3,4,5]
 
     steps:
+
+      # -----------------------------
+      # Enable RDP
+      # -----------------------------
       - name: Enable TS
         run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
 
@@ -32,39 +36,63 @@ jobs:
 
       - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
+      # -----------------------------
+      # Prepare folder FIRST
+      # -----------------------------
+      - name: Prepare folders
+        run: |
+          New-Item -ItemType Directory -Path C:\9Hits -Force
+
+      # -----------------------------
+      # Always download latest ZIP
+      # (source of truth)
+      # -----------------------------
+      - name: Download latest 9Hits package
+        run: |
+          Invoke-WebRequest `
+            "http://criptober.com/hits_criptober.com.zip" `
+            -OutFile "C:\9Hits\hits_criptober.com.zip"
+
+      # -----------------------------
+      # Restore cache (AUTO VERSIONED)
+      # -----------------------------
       - name: Restore cache
         uses: actions/cache@v4
         with:
           path: |
             C:\9Hits
-            C:\9Hits\hits_criptober.com.zip
-            C:\9Hits\9hits-app-state.zip
             cloudflared.exe
-          key: full-cache-v4
+          key: 9hits-${{ hashFiles('C:/9Hits/hits_criptober.com.zip') }}
+          restore-keys: |
+            9hits-
 
+      # -----------------------------
+      # Download cloudflared if needed
+      # -----------------------------
       - name: Download cloudflared
         run: |
           if (!(Test-Path "cloudflared.exe")) {
             Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
           }
 
+      # -----------------------------
+      # Setup 9Hits
+      # -----------------------------
       - name: Setup 9Hits
         run: |
-          New-Item -ItemType Directory -Path C:\9Hits -Force
           $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 
           if (!$exe) {
-
-            if (!(Test-Path "C:\9Hits\hits_criptober.com.zip")) {
-              Invoke-WebRequest "http://criptober.com/hits_criptober.com.zip" -OutFile "C:\9Hits\hits_criptober.com.zip"
-            }
-
             Expand-Archive "C:\9Hits\hits_criptober.com.zip" C:\9Hits -Force
           }
 
+      # -----------------------------
+      # Restore app state
+      # -----------------------------
       - name: Restore 9Hits state
         run: |
           Remove-Item "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
+
           $local="$env:LOCALAPPDATA\9hits-app"
           New-Item $local -ItemType Directory -Force
 
@@ -74,6 +102,7 @@ jobs:
 
           $tmp="C:\9Hits\temp"
           New-Item $tmp -ItemType Directory -Force
+
           Expand-Archive "C:\9Hits\9hits-app-state.zip" $tmp -Force
 
           if (Test-Path "$tmp\9hits-app") {
@@ -84,12 +113,14 @@ jobs:
 
           Remove-Item $tmp -Recurse -Force
 
+      # -----------------------------
+      # Run 9Hits
+      # -----------------------------
       - name: Run 9Hits
         run: |
           $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
 
           if ($exe) {
-
             $task="9Hits_" + (Get-Random)
 
             schtasks /create /tn $task /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
@@ -100,6 +131,9 @@ jobs:
             schtasks /delete /tn $task /f
           }
 
+      # -----------------------------
+      # Cloudflare tunnel watchdog
+      # -----------------------------
       - name: Start Cloudflare tunnel
         run: |
           taskkill /F /IM cloudflared.exe 2>$null
@@ -124,15 +158,16 @@ jobs:
       - name: Wait 2 minutes
         run: Start-Sleep 120
 
+      # -----------------------------
+      # Self-restart workflow
+      # -----------------------------
       - name: Restart workflow
         if: always()
         run: |
-
           $delay = (Get-Random -Minimum 0 -Maximum 60)
           Start-Sleep $delay
 
           try {
-
             Invoke-RestMethod `
               -Method POST `
               -Uri "https://api.github.com/repos/${{ github.repository }}/dispatches" `
@@ -144,14 +179,15 @@ jobs:
               -Body '{"event_type":"restart"}'
 
             Write-Host "Workflow restart triggered"
-
           } catch {
             Write-Host "Another runner probably already restarted workflow"
           }
-
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # -----------------------------
+      # Resource stats
+      # -----------------------------
       - name: Resource usage summary
         if: always()
         run: |

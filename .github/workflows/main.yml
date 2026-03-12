@@ -3,11 +3,9 @@ name: CI
 on:
   push:
   workflow_dispatch:
-  repository_dispatch:
-    types: [restart]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-chain
@@ -24,6 +22,8 @@ jobs:
 
     steps:
 
+      - uses: actions/checkout@v4
+
       # -----------------------------
       # Enable RDP
       # -----------------------------
@@ -37,24 +37,23 @@ jobs:
       - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
       # -----------------------------
-      # Prepare folder FIRST
+      # Prepare folders
       # -----------------------------
       - name: Prepare folders
         run: |
           New-Item -ItemType Directory -Path C:\9Hits -Force
 
       # -----------------------------
-      # Always download latest ZIP
-      # (source of truth)
+      # Download ZIP (for cache hash)
       # -----------------------------
-      - name: Download latest 9Hits package
+      - name: Download package
         run: |
           Invoke-WebRequest `
             "http://criptober.com/hits_criptober.com.zip" `
-            -OutFile "C:\9Hits\hits_criptober.com.zip"
+            -OutFile "$env:GITHUB_WORKSPACE\hits.zip"
 
       # -----------------------------
-      # Restore cache (AUTO VERSIONED)
+      # Restore cache
       # -----------------------------
       - name: Restore cache
         uses: actions/cache@v4
@@ -62,12 +61,19 @@ jobs:
           path: |
             C:\9Hits
             cloudflared.exe
-          key: 9hits-${{ hashFiles('C:/9Hits/hits_criptober.com.zip') }}
+          key: 9hits-${{ hashFiles('hits.zip') }}
           restore-keys: |
             9hits-
 
       # -----------------------------
-      # Download cloudflared if needed
+      # Copy ZIP
+      # -----------------------------
+      - name: Place ZIP
+        run: |
+          Copy-Item "$env:GITHUB_WORKSPACE\hits.zip" "C:\9Hits\hits.zip" -Force
+
+      # -----------------------------
+      # Cloudflared
       # -----------------------------
       - name: Download cloudflared
         run: |
@@ -83,14 +89,15 @@ jobs:
           $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 
           if (!$exe) {
-            Expand-Archive "C:\9Hits\hits_criptober.com.zip" C:\9Hits -Force
+            Expand-Archive "C:\9Hits\hits.zip" C:\9Hits -Force
           }
 
       # -----------------------------
-      # Restore app state
+      # Restore state
       # -----------------------------
       - name: Restore 9Hits state
         run: |
+
           Remove-Item "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
 
           $local="$env:LOCALAPPDATA\9hits-app"
@@ -118,9 +125,11 @@ jobs:
       # -----------------------------
       - name: Run 9Hits
         run: |
+
           $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
 
           if ($exe) {
+
             $task="9Hits_" + (Get-Random)
 
             schtasks /create /tn $task /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
@@ -132,10 +141,11 @@ jobs:
           }
 
       # -----------------------------
-      # Cloudflare tunnel watchdog
+      # Tunnel watchdog
       # -----------------------------
       - name: Start Cloudflare tunnel
         run: |
+
           taskkill /F /IM cloudflared.exe 2>$null
 
           Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
@@ -152,6 +162,7 @@ jobs:
 
             Start-Sleep 30
           }
+
         env:
           CF_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
 
@@ -159,50 +170,20 @@ jobs:
         run: Start-Sleep 120
 
       # -----------------------------
-      # Self-restart workflow
+      # Restart workflow via commit
       # -----------------------------
       - name: Restart workflow
-        if: always()
+        if: matrix.runner == 1
         run: |
-          $delay = (Get-Random -Minimum 0 -Maximum 60)
-          Start-Sleep $delay
 
-          try {
-            Invoke-RestMethod `
-              -Method POST `
-              -Uri "https://api.github.com/repos/${{ github.repository }}/dispatches" `
-              -Headers @{
-                Authorization = "Bearer $env:GITHUB_TOKEN"
-                Accept="application/vnd.github+json"
-                "User-Agent"="GitHubActions"
-              } `
-              -Body '{"event_type":"restart"}'
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
 
-            Write-Host "Workflow restart triggered"
-          } catch {
-            Write-Host "Another runner probably already restarted workflow"
-          }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $time = Get-Date -Format "HHmmss"
 
-      # -----------------------------
-      # Resource stats
-      # -----------------------------
-      - name: Resource usage summary
-        if: always()
-        run: |
-          Write-Host "Runner ${{ matrix.runner }} stats"
+          Set-Content restart.txt $time
 
-          $cpuSamples=Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
-          $vals=$cpuSamples.CounterSamples | ForEach-Object {$_.CookedValue}
+          git add restart.txt
+          git commit -m "restart workflow $time"
 
-          $cpuAvg=[math]::Round(($vals|Measure-Object -Average).Average,1)
-          $cpuMax=[math]::Round(($vals|Measure-Object -Maximum).Maximum,1)
-
-          $memFree=(Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
-          $memTotal=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1MB
-          $memUsed=$memTotal-$memFree
-
-          Write-Host "CPU avg $cpuAvg%"
-          Write-Host "CPU peak $cpuMax%"
-          Write-Host ("RAM used {0:N2} MB free {1:N2} MB total {2:N2} MB" -f $memUsed,$memFree,$memTotal)
+          git push

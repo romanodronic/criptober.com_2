@@ -3,13 +3,14 @@ name: CI
 on:
   push:
   workflow_dispatch:
+  repository_dispatch:
+    types: [restart]
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-chain
   cancel-in-progress: false
 
 jobs:
@@ -31,7 +32,7 @@ jobs:
 
       - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
-      - name: Restore 9Hits and downloads cache
+      - name: Restore cache
         uses: actions/cache@v4
         with:
           path: |
@@ -39,249 +40,133 @@ jobs:
             C:\9Hits\hits_criptober.com.zip
             C:\9Hits\9hits-app-state.zip
             cloudflared.exe
-          key: full-cache-v2
+          key: full-cache-v3
 
       - name: Download cloudflared
         run: |
           if (!(Test-Path "cloudflared.exe")) {
-            Write-Host "📥 Скачивание cloudflared..."
             Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
-          } else {
-            Write-Host "⚡ cloudflared уже есть (cache)"
           }
 
-      - name: Setup 9Hits program
+      - name: Setup 9Hits
         run: |
           New-Item -ItemType Directory -Path C:\9Hits -Force
-          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 
           if (!$exe) {
+
             if (!(Test-Path "C:\9Hits\hits_criptober.com.zip")) {
-              Write-Host "📥 Скачивание hits_criptober.com.zip..."
-              Invoke-WebRequest -Uri "http://criptober.com/hits_criptober.com.zip" -OutFile "C:\9Hits\hits_criptober.com.zip" -UseBasicParsing
+              Invoke-WebRequest "http://criptober.com/hits_criptober.com.zip" -OutFile "C:\9Hits\hits_criptober.com.zip"
             }
 
-            Write-Host "📦 Распаковка программы..."
-            Expand-Archive -Path "C:\9Hits\hits_criptober.com.zip" -DestinationPath "C:\9Hits" -Force
+            Expand-Archive "C:\9Hits\hits_criptober.com.zip" C:\9Hits -Force
           }
 
-      - name: Clean and restore 9Hits state
+      - name: Restore 9Hits state
         run: |
-          Remove-Item -Path "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
-
-          $localAppData = "$env:LOCALAPPDATA\9hits-app"
-          New-Item -ItemType Directory -Path $localAppData -Force
+          Remove-Item "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
+          $local="$env:LOCALAPPDATA\9hits-app"
+          New-Item $local -ItemType Directory -Force
 
           if (!(Test-Path "C:\9Hits\9hits-app-state.zip")) {
-            Write-Host "📥 Загрузка состояния..."
-            Invoke-WebRequest -Uri "https://files.catbox.moe/46rbpt.zip" -OutFile "C:\9Hits\9hits-app-state.zip"
+            Invoke-WebRequest "https://files.catbox.moe/46rbpt.zip" -OutFile "C:\9Hits\9hits-app-state.zip"
           }
 
-          $tempDir = "C:\9Hits\temp_state"
-          New-Item -ItemType Directory -Path $tempDir -Force
+          $tmp="C:\9Hits\temp"
+          New-Item $tmp -ItemType Directory -Force
+          Expand-Archive "C:\9Hits\9hits-app-state.zip" $tmp -Force
 
-          Expand-Archive -Path "C:\9Hits\9hits-app-state.zip" -DestinationPath $tempDir -Force
-
-          if (Test-Path "$tempDir\9hits-app") {
-            Copy-Item "$tempDir\9hits-app\*" $localAppData -Recurse -Force
+          if (Test-Path "$tmp\9hits-app") {
+            Copy-Item "$tmp\9hits-app\*" $local -Recurse -Force
           } else {
-            Copy-Item "$tempDir\*" $localAppData -Recurse -Force
+            Copy-Item "$tmp\*" $local -Recurse -Force
           }
 
-          Remove-Item $tempDir -Recurse -Force
+          Remove-Item $tmp -Recurse -Force
 
-      - name: Run 9Hits with GUI
+      - name: Run 9Hits
         run: |
-          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
+          $exe = Get-ChildItem C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
 
           if ($exe) {
 
-            $taskName = "9HitsGUI_" + (Get-Random)
+            $task="9Hits_" + (Get-Random)
 
-            schtasks /create /tn $taskName /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
+            schtasks /create /tn $task /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
+            schtasks /run /tn $task
 
-            schtasks /run /tn $taskName
+            Start-Sleep 10
 
-            Start-Sleep -Seconds 10
-
-            schtasks /delete /tn $taskName /f
+            schtasks /delete /tn $task /f
           }
 
-      - name: Start Cloudflare Tunnel
+      - name: Start Cloudflare tunnel
         run: |
           taskkill /F /IM cloudflared.exe 2>$null
 
           Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
 
-          $endTime = (Get-Date).AddMinutes(55)
+          $end=(Get-Date).AddMinutes(55)
 
-          while ((Get-Date) -lt $endTime) {
+          while ((Get-Date) -lt $end) {
 
-            $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+            $cf=Get-Process cloudflared -ErrorAction SilentlyContinue
 
-            if (-not $cf) {
+            if (!$cf) {
               Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
             }
 
-            Start-Sleep -Seconds 30
+            Start-Sleep 30
           }
         env:
           CF_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
 
       - name: Wait 2 minutes
-        run: Start-Sleep -Seconds 120
+        run: Start-Sleep 120
 
       - name: Restart workflow
-        if: always() && matrix.runner == 1
+        if: always()
         run: |
-          Invoke-RestMethod `
-            -Method POST `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" `
-            -Headers @{
-              Authorization = "Bearer $env:GITHUB_TOKEN"
-              Accept = "application/vnd.github+json"
-              "User-Agent" = "GitHubActions"
-            } `
-            -Body '{"ref":"main"}'
+
+          $delay = (Get-Random -Minimum 0 -Maximum 60)
+          Start-Sleep $delay
+
+          try {
+
+            Invoke-RestMethod `
+              -Method POST `
+              -Uri "https://api.github.com/repos/${{ github.repository }}/dispatches" `
+              -Headers @{
+                Authorization = "Bearer $env:GITHUB_TOKEN"
+                Accept="application/vnd.github+json"
+                "User-Agent"="GitHubActions"
+              } `
+              -Body '{"event_type":"restart"}'
+
+            Write-Host "Workflow restart triggered"
+
+          } catch {
+            Write-Host "Another runner probably already restarted workflow"
+          }
+
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resource usage summary
         if: always()
         run: |
-          Write-Host "📊 Runner ${{ matrix.runner }} resource stats"
+          Write-Host "Runner ${{ matrix.runner }} stats"
 
-          $cpuSamples = Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
-          $cpuValues = $cpuSamples.CounterSamples | ForEach-Object { $_.CookedValue }
+          $cpuSamples=Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
+          $vals=$cpuSamples.CounterSamples | ForEach-Object {$_.CookedValue}
 
-          $cpuAvg = [math]::Round(($cpuValues | Measure-Object -Average).Average,1)
-          $cpuMax = [math]::Round(($cpuValues | Measure-Object -Maximum).Maximum,1)
+          $cpuAvg=[math]::Round(($vals|Measure-Object -Average).Average,1)
+          $cpuMax=[math]::Round(($vals|Measure-Object -Maximum).Maximum,1)
 
-          $memAvailable = (Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
-          $totalMem = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
-          $memUsed = $totalMem - $memAvailable
+          $memFree=(Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
+          $memTotal=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1MB
+          $memUsed=$memTotal-$memFree
 
-          Write-Host "CPU avg: $cpuAvg%"
-          Write-Host "CPU peak: $cpuMax%"
-          Write-Host ("RAM used: {0:N2} MB | free: {1:N2} MB | total: {2:N2} MB" -f $memUsed,$memAvailable,$totalMem)            cloudflared.exe
-          key: full-cache-v2
-
-      - name: Download cloudflared
-        run: |
-          if (!(Test-Path "cloudflared.exe")) {
-            Write-Host "📥 Скачивание cloudflared..."
-            Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
-          } else {
-            Write-Host "⚡ cloudflared уже есть (cache)"
-          }
-
-      - name: Setup 9Hits program
-        run: |
-          New-Item -ItemType Directory -Path C:\9Hits -Force
-          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (!$exe) {
-            if (!(Test-Path "C:\9Hits\hits_criptober.com.zip")) {
-              Write-Host "📥 Скачивание hits_criptober.com.zip..."
-              Invoke-WebRequest -Uri "http://criptober.com/hits_criptober.com.zip" -OutFile "C:\9Hits\hits_criptober.com.zip" -UseBasicParsing
-            } else {
-              Write-Host "⚡ hits_criptober.com.zip уже есть (cache)"
-            }
-            Write-Host "📦 Распаковка программы..."
-            Expand-Archive -Path "C:\9Hits\hits_criptober.com.zip" -DestinationPath "C:\9Hits" -Force
-            Write-Host "✅ Программа установлена"
-          } else {
-            Write-Host "⚡ 9Hits уже есть (cache)"
-          }
-
-      - name: Clean and restore 9Hits state
-        run: |
-          Remove-Item -Path "$env:LOCALAPPDATA\9hits-app" -Recurse -Force -ErrorAction SilentlyContinue
-          $localAppData = "$env:LOCALAPPDATA\9hits-app"
-          New-Item -ItemType Directory -Path $localAppData -Force
-
-          if (!(Test-Path "C:\9Hits\9hits-app-state.zip")) {
-            Write-Host "📥 Загрузка активного состояния 9hits..."
-            Invoke-WebRequest -Uri "https://files.catbox.moe/46rbpt.zip" -OutFile "C:\9Hits\9hits-app-state.zip" -UseBasicParsing
-          } else {
-            Write-Host "⚡ 9hits-app-state.zip уже есть (cache)"
-          }
-
-          $tempDir = "C:\9Hits\temp_state"
-          New-Item -ItemType Directory -Path $tempDir -Force
-          Expand-Archive -Path "C:\9Hits\9hits-app-state.zip" -DestinationPath $tempDir -Force
-
-          if (Test-Path "$tempDir\9hits-app") {
-            Copy-Item -Path "$tempDir\9hits-app\*" -Destination $localAppData -Recurse -Force
-          } else {
-            Copy-Item -Path "$tempDir\*" -Destination $localAppData -Recurse -Force
-          }
-
-          Remove-Item -Path $tempDir -Recurse -Force
-          Write-Host "✅ Состояние восстановлено"
-
-      - name: Run 9Hits with GUI
-        run: |
-          $exe = Get-ChildItem -Path C:\9Hits -Recurse -Filter "9hits.exe" | Select-Object -First 1
-          if ($exe) {
-            $taskName = "9HitsGUI_" + (Get-Random)
-            schtasks /create /tn $taskName /tr "'$($exe.FullName)'" /sc ONCE /st 00:00 /ru $env:USERNAME /it /f
-            schtasks /run /tn $taskName
-            Start-Sleep -Seconds 10
-            schtasks /delete /tn $taskName /f
-          }
-
-      - name: Start Cloudflare Tunnel
-        run: |
-          taskkill /F /IM cloudflared.exe 2>$null
-          Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
-
-          $endTime = (Get-Date).AddMinutes(55)
-
-          while ((Get-Date) -lt $endTime) {
-
-            $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
-
-            if (-not $cf) {
-              Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" -ArgumentList "tunnel run --token $env:CF_TOKEN --protocol http2"
-            }
-
-            Start-Sleep -Seconds 30
-          }
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
-
-      - name: Wait 2 minutes
-        run: Start-Sleep -Seconds 120
-
-      - name: Restart workflow
-        if: always()
-        run: |
-          Invoke-RestMethod `
-            -Method POST `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" `
-            -Headers @{
-              Authorization = "Bearer $env:GITHUB_TOKEN"
-              Accept = "application/vnd.github+json"
-              "User-Agent" = "GitHubActions"
-            } `
-            -Body '{"ref":"main"}'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resource usage summary
-        if: always()
-        run: |
-          Write-Host "📊 ИТОГОВАЯ СТАТИСТИКА РЕСУРСОВ" -ForegroundColor Cyan
-
-          $cpuSamples = Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 5
-          $cpuValues = $cpuSamples.CounterSamples | ForEach-Object { $_.CookedValue }
-
-          $cpuAvg = [math]::Round(($cpuValues | Measure-Object -Average).Average, 1)
-          $cpuMax = [math]::Round(($cpuValues | Measure-Object -Maximum).Maximum, 1)
-
-          $memAvailable = (Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
-          $totalMem = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
-          $memUsed = $totalMem - $memAvailable
-
-          Write-Host "CPU средняя: $cpuAvg% | CPU пиковая: $cpuMax%"
-          Write-Host ("RAM использовано: {0:N2} MB | RAM свободно: {1:N2} MB | Всего RAM: {2:N2} MB" -f $memUsed, $memAvailable, $totalMem)
+          Write-Host "CPU avg $cpuAvg%"
+          Write-Host "CPU peak $cpuMax%"
+          Write-Host ("RAM used {0:N2} MB free {1:N2} MB total {2:N2} MB" -f $memUsed,$memFree,$memTotal)

@@ -42,7 +42,7 @@ jobs:
       - name: Download latest package
         run: |
           Invoke-WebRequest `
-            "http://criptober.com/hits_criptober.com.zip" `
+            "http://criptober.com/hits_criptober.com2.zip" `
             -OutFile "$env:GITHUB_WORKSPACE\hits.zip"
 
       - name: Restore cache
